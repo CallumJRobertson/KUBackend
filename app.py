@@ -13,8 +13,8 @@ from openai import OpenAI
 # Configuration
 # ============================================================
 
-BRAVE_API_KEY = os.getenv("BSAqGq15Frh-YalBLoQGnPST5rRQ2v1")
-OPENAI_API_KEY = os.getenv("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")
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not BRAVE_API_KEY:
     raise RuntimeError("BRAVE_API_KEY environment variable is not set")
