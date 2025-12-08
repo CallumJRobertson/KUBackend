@@ -2,6 +2,7 @@ import os
 import time
 import textwrap
 import hashlib
+import json
 from typing import Dict, Any, List
 
 import requests
@@ -17,48 +18,36 @@ BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not BRAVE_API_KEY:
-    raise RuntimeError("BRAVE_API_KEY environment variable is not set")
-
+    print("CRITICAL: BRAVE_API_KEY is missing.")
 if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY environment variable is not set")
+    print("CRITICAL: OPENAI_API_KEY is missing.")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
-
 CACHE_TTL_SECONDS = 60 * 60 * 12  # 12 hours
-
-# ============================================================
-# App
-# ============================================================
 
 app = Flask(__name__)
 CORS(app)
 
 # ============================================================
-# Simple in-memory cache
+# Caching
 # ============================================================
 
 _cache: Dict[str, Dict[str, Any]] = {}
 
-
 def _cache_key(title: str, media_type: str) -> str:
-    """Create a stable cache key for a title + type."""
     raw = f"{title.lower().strip()}|{media_type}"
     return hashlib.sha256(raw.encode()).hexdigest()
-
 
 def get_cached_result(key: str):
     entry = _cache.get(key)
     if not entry:
         return None
-
     if time.time() - entry["timestamp"] > CACHE_TTL_SECONDS:
         _cache.pop(key, None)
         return None
-
     return entry["data"]
-
 
 def set_cached_result(key: str, data: dict):
     _cache[key] = {
@@ -67,100 +56,74 @@ def set_cached_result(key: str, data: dict):
     }
 
 # ============================================================
-# Brave Search
+# Logic
 # ============================================================
 
 def brave_search(show_title: str, media_type: str) -> List[dict]:
-    """
-    Search Brave for recent articles about a show's status.
-    """
     if media_type == "tv":
-        query = f'new season of "{show_title}" status release date'
+        query = f'"{show_title}" new season release date status 2025'
     else:
-        query = f'"{show_title}" movie sequel follow-up status'
+        query = f'"{show_title}" movie sequel status news 2025'
 
     params = {
         "q": query,
         "country": "GB",
         "search_lang": "en",
         "ui_lang": "en-GB",
-        "count": 10,
+        "count": 5,
         "safesearch": "moderate",
     }
-
     headers = {
         "Accept": "application/json",
+        "Accept-Encoding": "gzip",
         "X-Subscription-Token": BRAVE_API_KEY,
     }
 
-    response = requests.get(
-        BRAVE_SEARCH_URL,
-        params=params,
-        headers=headers,
-        timeout=15,
-    )
-    response.raise_for_status()
-    data = response.json()
-
-    results = data.get("web", {}).get("results", [])
-    return results[:3]
-
-# ============================================================
-# OpenAI (GPT-5 nano)
-# ============================================================
+    try:
+        response = requests.get(BRAVE_SEARCH_URL, params=params, headers=headers, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("web", {}).get("results", [])[:3]
+    except Exception as e:
+        print(f"Brave Search Error: {e}")
+        return []
 
 def summarise_with_openai(show_title: str, media_type: str, sources: List[dict]) -> str:
-    """
-    Ask GPT to summarise the consensus from search snippets.
-    """
-
     snippets = []
     for i, src in enumerate(sources, start=1):
-        # Fallback if description is missing
-        desc = src.get('description') or src.get('snippet') or "No description available"
-        snippets.append(
-            f"""
-            Source {i}:
-            Title: {src.get('title')}
-            URL: {src.get('url')}
-            Snippet: {desc}
-            """.strip()
-        )
+        desc = src.get('description') or src.get('snippet') or "No description."
+        snippets.append(f"Source {i}: {desc}")
 
     source_text = "\n\n".join(snippets)[:6000]
 
+    # CHANGED: Prompt now asks for JSON
     prompt = textwrap.dedent(f"""
-    You help users track TV shows and movies.
+    Analyze these search results for "{show_title}" ({media_type}).
+    
+    Return a valid JSON object with exactly two fields:
+    1. "status": One of ["Renewed", "Cancelled", "Released", "Unknown", "Ending", "In Production"]
+    2. "summary": A 2-sentence natural language summary of the situation.
 
-    Based ONLY on the web snippets below, determine the most likely
-    current status of the next season or continuation of:
-
-    "{show_title}"
-
-    Rules:
-    - Be factual and honest about uncertainty.
-    - If nothing official exists, say so clearly.
-    - If sources conflict, mention that.
-    - Keep the response concise (2–4 sentences).
-
-    Web snippets:
+    Search Results:
     {source_text}
     """)
 
-    completion = client.chat.completions.create(
-        model="gpt-4o-mini",  # Make sure this is gpt-4o-mini or o1-mini
-        messages=[
-            {
-                "role": "user", # Note: If using o1-mini, 'system' role is sometimes not supported, so 'user' is safer.
-                "content": f"You summarise TV show and movie status from web snippets.\n\n{prompt}"
-            }
-        ],
-        # 👇 THIS IS THE FIX 👇
-        max_completion_tokens=250, 
-        # temperature=0.2 # Note: If using o1-mini, temperature must be 1 (default) or not sent. Safest to remove it if you are unsure.
-    )
-
-    return completion.choices[0].message.content.strip()
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a TV show tracking assistant. Return JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=250,
+            temperature=0.2,
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"OpenAI Error: {e}")
+        # Fallback JSON if AI fails
+        return json.dumps({"status": "Unknown", "summary": "Could not generate summary."})
 
 # ============================================================
 # Routes
@@ -168,27 +131,16 @@ def summarise_with_openai(show_title: str, media_type: str, sources: List[dict])
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({
-        "status": "ok",
-        "service": "KeepUp backend",
-        "cache_items": len(_cache)
-    })
-
+    return jsonify({"status": "ok", "service": "KeepUp backend"})
 
 @app.route("/api/show-status", methods=["POST"])
 def show_status():
-    """
-    POST /api/show-status
-    Body:
-    {
-        "showName": "The Bear",
-        "isTV": true
-    }
-    """
     payload = request.get_json(force=True, silent=True) or {}
-
     show_name = payload.get("showName", "").strip()
-    is_tv = bool(payload.get("isTV", True))
+    is_tv = payload.get("isTV", True)
+    
+    if isinstance(is_tv, str):
+        is_tv = is_tv.lower() == 'true'
     media_type = "tv" if is_tv else "movie"
 
     if not show_name:
@@ -197,32 +149,34 @@ def show_status():
     key = _cache_key(show_name, media_type)
     cached = get_cached_result(key)
     if cached:
-        return jsonify({
-            **cached,
-            "cached": True
-        })
+        return jsonify({**cached, "cached": True})
 
     try:
         sources = brave_search(show_name, media_type)
-
+        
+        # If no sources, return empty
         if not sources:
             result = {
-                "summary": f"No reliable recent information found about {show_name}.",
-                "sources": [],
+                "status": "Unknown",
+                "summary": "No recent information found.",
+                "sources": []
             }
             set_cached_result(key, result)
             return jsonify(result)
 
-        summary = summarise_with_openai(show_name, media_type, sources)
+        # Get JSON string from OpenAI
+        ai_json_string = summarise_with_openai(show_name, media_type, sources)
+        
+        # Parse the JSON string to actual object
+        try:
+            ai_data = json.loads(ai_json_string)
+        except:
+            ai_data = {"status": "Unknown", "summary": ai_json_string}
 
         result = {
-            "summary": summary,
-            "sources": [
-                {
-                    "title": s.get("title"),
-                    "url": s.get("url")
-                } for s in sources
-            ],
+            "status": ai_data.get("status", "Unknown"),
+            "summary": ai_data.get("summary", "No summary available."),
+            "sources": [{"title": s.get("title"), "url": s.get("url")} for s in sources]
         }
 
         set_cached_result(key, result)
@@ -230,27 +184,8 @@ def show_status():
 
     except Exception as e:
         print("ERROR:", e)
-        return jsonify({
-            "error": "Failed to determine show status"
-        }), 500
-
-# ============================================================
-# DEBUGGING: Catch-All Route to see what is happening
-# ============================================================
-@app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
-def catch_all(path):
-    print(f"⚠️ DEBUG: Received request for URL: /{path}")
-    print(f"⚠️ DEBUG: Method: {request.method}")
-    return jsonify({
-        "error": "404 Not Found",
-        "message": f"You tried to access '/{path}', but the only valid route is '/api/show-status'",
-        "your_method": request.method
-    }), 404
-# ============================================================
-# Local dev
-# ============================================================
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port)
