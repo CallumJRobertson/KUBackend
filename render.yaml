@@ -8,5 +8,5 @@ services:
     envVars:
       - key: OPENAI_API_KEY
         sync: false
-      - key: BING_API_KEY
+      - key: BRAVE_API_KEY
         sync: false
