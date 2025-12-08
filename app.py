@@ -111,21 +111,23 @@ def brave_search(show_title: str, media_type: str) -> List[dict]:
 
 def summarise_with_openai(show_title: str, media_type: str, sources: List[dict]) -> str:
     """
-    Ask GPT-5 nano to summarise the consensus from search snippets.
+    Ask GPT to summarise the consensus from search snippets.
     """
 
     snippets = []
     for i, src in enumerate(sources, start=1):
+        # Fallback if description is missing
+        desc = src.get('description') or src.get('snippet') or "No description available"
         snippets.append(
             f"""
             Source {i}:
             Title: {src.get('title')}
             URL: {src.get('url')}
-            Snippet: {src.get('description')}
+            Snippet: {desc}
             """.strip()
         )
 
-    source_text = "\n\n".join(snippets)[:6000]  # safety truncation
+    source_text = "\n\n".join(snippets)[:6000]
 
     prompt = textwrap.dedent(f"""
     You help users track TV shows and movies.
@@ -146,19 +148,16 @@ def summarise_with_openai(show_title: str, media_type: str, sources: List[dict])
     """)
 
     completion = client.chat.completions.create(
-        model="gpt-5-nano",
+        model="gpt-4o-mini",  # Make sure this is gpt-4o-mini or o1-mini
         messages=[
             {
-                "role": "system",
-                "content": "You summarise TV show and movie status from web snippets."
-            },
-            {
-                "role": "user",
-                "content": prompt
+                "role": "user", # Note: If using o1-mini, 'system' role is sometimes not supported, so 'user' is safer.
+                "content": f"You summarise TV show and movie status from web snippets.\n\n{prompt}"
             }
         ],
-        max_tokens=250,
-        temperature=0.2,
+        # 👇 THIS IS THE FIX 👇
+        max_completion_tokens=250, 
+        # temperature=0.2 # Note: If using o1-mini, temperature must be 1 (default) or not sent. Safest to remove it if you are unsure.
     )
 
     return completion.choices[0].message.content.strip()
