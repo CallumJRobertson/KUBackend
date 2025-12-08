@@ -3,6 +3,7 @@ import time
 import textwrap
 import hashlib
 import json
+import sys
 from typing import Dict, Any, List
 
 import requests
@@ -14,15 +15,23 @@ from openai import OpenAI
 # Configuration
 # ============================================================
 
+# Use standard spaces for indentation
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not BRAVE_API_KEY:
-    print("CRITICAL: BRAVE_API_KEY is missing.")
-if not OPENAI_API_KEY:
-    print("CRITICAL: OPENAI_API_KEY is missing.")
+# Safer Initialization logic
+client = None
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+if not BRAVE_API_KEY:
+    print("⚠️ CRITICAL: BRAVE_API_KEY is missing.", file=sys.stderr)
+
+if not OPENAI_API_KEY:
+    print("⚠️ CRITICAL: OPENAI_API_KEY is missing.", file=sys.stderr)
+else:
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+    except Exception as e:
+        print(f"⚠️ Failed to init OpenAI: {e}", file=sys.stderr)
 
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 CACHE_TTL_SECONDS = 60 * 60 * 12  # 12 hours
@@ -60,6 +69,10 @@ def set_cached_result(key: str, data: dict):
 # ============================================================
 
 def brave_search(show_title: str, media_type: str) -> List[dict]:
+    if not BRAVE_API_KEY:
+        print("Brave Search skipped: Missing API Key")
+        return []
+
     if media_type == "tv":
         query = f'"{show_title}" new season release date status 2025'
     else:
@@ -85,10 +98,13 @@ def brave_search(show_title: str, media_type: str) -> List[dict]:
         data = response.json()
         return data.get("web", {}).get("results", [])[:3]
     except Exception as e:
-        print(f"Brave Search Error: {e}")
+        print(f"Brave Search Error: {e}", file=sys.stderr)
         return []
 
 def summarise_with_openai(show_title: str, media_type: str, sources: List[dict]) -> str:
+    if not client:
+        return json.dumps({"status": "Unknown", "summary": "AI is unavailable (Missing Key)."})
+
     snippets = []
     for i, src in enumerate(sources, start=1):
         desc = src.get('description') or src.get('snippet') or "No description."
@@ -121,7 +137,7 @@ def summarise_with_openai(show_title: str, media_type: str, sources: List[dict])
         )
         return completion.choices[0].message.content.strip()
     except Exception as e:
-        print(f"OpenAI Error: {e}")
+        print(f"OpenAI Error: {e}", file=sys.stderr)
         # Fallback JSON if AI fails
         return json.dumps({"status": "Unknown", "summary": "Could not generate summary."})
 
@@ -183,7 +199,7 @@ def show_status():
         return jsonify(result)
 
     except Exception as e:
-        print("ERROR:", e)
+        print(f"ERROR: {e}", file=sys.stderr)
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
