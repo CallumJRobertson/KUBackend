@@ -235,7 +235,19 @@ def show_status():
             "error": "Failed to determine show status"
         }), 500
 
-
+# ============================================================
+# DEBUGGING: Catch-All Route to see what is happening
+# ============================================================
+@app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def catch_all(path):
+    print(f"⚠️ DEBUG: Received request for URL: /{path}")
+    print(f"⚠️ DEBUG: Method: {request.method}")
+    return jsonify({
+        "error": "404 Not Found",
+        "message": f"You tried to access '/{path}', but the only valid route is '/api/show-status'",
+        "your_method": request.method
+    }), 404
 # ============================================================
 # Local dev
 # ============================================================
