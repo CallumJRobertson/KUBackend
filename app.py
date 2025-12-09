@@ -117,7 +117,9 @@ def summarise_with_openai(show_title: str, media_type: str, sources: List[dict])
     Analyze these search results for "{show_title}" ({media_type}).
     
     Return a valid JSON object with exactly two fields:
-    1. "status": One of ["Renewed", "Cancelled", "Released", "Unknown", "Ending", "In Production"]
+    1. "status": One of ["Renewed", "Cancelled", "Concluded", "Released", "Unknown", "Ending", "In Production"]. 
+       * Use "Concluded" if the show finished its final intended season (natural ending).
+       * Use "Cancelled" only if the show was abruptly stopped by the network/studio with more seasons expected.
     2. "summary": A 2-sentence natural language summary of the situation.
 
     Search Results:
