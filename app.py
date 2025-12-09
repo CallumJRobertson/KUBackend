@@ -5,6 +5,7 @@ import hashlib
 import json
 import sys
 from typing import Dict, Any, List
+import redis 
 
 import requests
 from flask import Flask, jsonify, request
@@ -18,6 +19,18 @@ from openai import OpenAI
 # Use standard spaces for indentation
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0") 
+r = None # Redis connection object
+
+# In the Initialization section:
+try:
+    r = redis.from_url(REDIS_URL, decode_responses=True)
+    r.ping()
+    print("✅ Redis connected successfully.")
+except Exception as e:
+    r = None
+    print(f"⚠️ WARNING: Could not connect to Redis: {e}", file=sys.stderr)
 
 # Safer Initialization logic
 client = None
