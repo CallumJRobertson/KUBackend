@@ -5,80 +5,142 @@ import hashlib
 import json
 import sys
 from typing import Dict, Any, List
-import redis 
 
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from openai import OpenAI
+import redis
+import pymongo # ✅ NEW: MongoDB client
 
 # ============================================================
 # Configuration
 # ============================================================
 
-# Use standard spaces for indentation
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0") 
-r = None # Redis connection object
+# ✅ NEW: MongoDB Atlas Connection String
+MONGO_URI = os.getenv("MONGO_URI") 
 
-# In the Initialization section:
-try:
-    r = redis.from_url(REDIS_URL, decode_responses=True)
-    r.ping()
-    print("✅ Redis connected successfully.")
-except Exception as e:
-    r = None
-    print(f"⚠️ WARNING: Could not connect to Redis: {e}", file=sys.stderr)
-
-# Safer Initialization logic
+# Connection Objects
 client = None
+r = None        # Redis connection
+db_collection = None # MongoDB collection object
 
-if not BRAVE_API_KEY:
-    print("⚠️ CRITICAL: BRAVE_API_KEY is missing.", file=sys.stderr)
-
-if not OPENAI_API_KEY:
-    print("⚠️ CRITICAL: OPENAI_API_KEY is missing.", file=sys.stderr)
+# Initialization Logic
+if not BRAVE_API_KEY or not OPENAI_API_KEY:
+    print("⚠️ CRITICAL: API Keys missing.", file=sys.stderr)
 else:
     try:
         client = OpenAI(api_key=OPENAI_API_KEY)
     except Exception as e:
         print(f"⚠️ Failed to init OpenAI: {e}", file=sys.stderr)
 
-BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
-CACHE_TTL_SECONDS = 60 * 60 * 12  # 12 hours
+# --- 1. Initialize Redis (Tier 1: Speed) ---
+try:
+    r = redis.from_url(REDIS_URL, decode_responses=True)
+    r.ping()
+    print("✅ Redis connected successfully.")
+except Exception as e:
+    r = None
+    print(f"⚠️ WARNING: Redis connection failed (speed cache is unavailable): {e}", file=sys.stderr)
 
+# --- 2. Initialize MongoDB (Tier 2: Persistence) ---
+if MONGO_URI:
+    try:
+        mongo_client = pymongo.MongoClient(MONGO_URI)
+        # Using a database named 'keepup_db' and a collection named 'ai_status'
+        db_collection = mongo_client.get_database("keepup_db").get_collection("ai_status")
+        db_collection.create_index([("_id", pymongo.ASCENDING)], unique=True)
+        print("✅ MongoDB connected successfully.")
+    except Exception as e:
+        print(f"⚠️ WARNING: MongoDB connection failed (persistent cache unavailable): {e}", file=sys.stderr)
+
+# --- CACHING CONSTANTS ---
+DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 12
+PERMANENT_STATUSES = ["cancelled", "concluded", "ended"] 
+
+BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 app = Flask(__name__)
 CORS(app)
 
 # ============================================================
-# Caching
+# Tiered Caching Functions (Replaces old in-memory cache)
 # ============================================================
 
-_cache: Dict[str, Dict[str, Any]] = {}
-
 def _cache_key(title: str, media_type: str) -> str:
+    # Key format: 'sha256hash'
     raw = f"{title.lower().strip()}|{media_type}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 def get_cached_result(key: str):
-    entry = _cache.get(key)
-    if not entry:
-        return None
-    if time.time() - entry["timestamp"] > CACHE_TTL_SECONDS:
-        _cache.pop(key, None)
-        return None
-    return entry["data"]
+    # TIER 1: Check Redis (Fastest)
+    if r:
+        try:
+            json_data = r.get(key)
+            if json_data:
+                print("Cache HIT: Redis (Tier 1)")
+                return json.loads(json_data)
+        except Exception as e:
+            print(f"Redis GET Error: {e}", file=sys.stderr)
 
-def set_cached_result(key: str, data: dict):
-    _cache[key] = {
-        "timestamp": time.time(),
-        "data": data
-    }
+    # TIER 2: Check MongoDB (Persistent)
+    if db_collection:
+        try:
+            # MongoDB uses "_id" as the primary key
+            document = db_collection.find_one({"_id": key})
+            if document:
+                expiry_time = document.get("expiry_time", 0) 
+                
+                if time.time() < expiry_time:
+                    print("Cache HIT: MongoDB (Tier 2)")
+                    
+                    # Cache Warming: Push back to Redis for next time
+                    if r: set_cached_result(key, document['data'], status="WARM") 
+                    
+                    return document['data']
+                else:
+                    # Delete stale entry from MongoDB (should only happen after 100 years here)
+                    db_collection.delete_one({"_id": key})
+                    
+        except Exception as e:
+            print(f"MongoDB GET Error: {e}", file=sys.stderr)
+            
+    print("Cache MISS")
+    return None
+
+def set_cached_result(key: str, data: dict, status: str):
+    status_lower = status.lower()
+    
+    # 1. Save to REDIS (Tier 1) for 12 hours (always)
+    if r:
+        try:
+            r.set(key, json.dumps(data), ex=DEFAULT_CACHE_TTL_SECONDS)
+        except Exception as e:
+            print(f"Redis SET Error: {e}", file=sys.stderr)
+
+    # 2. Save to MONGODB (Tier 2) only if status is permanent
+    if status_lower in PERMANENT_STATUSES:
+        if db_collection:
+            # Set expiry far in the future (100 years)
+            expiry_time = int(time.time() + (60 * 60 * 24 * 365 * 100)) 
+            
+            try:
+                db_collection.update_one(
+                    {"_id": key},
+                    {"$set": {
+                        "data": data,
+                        "expiry_time": expiry_time
+                    }},
+                    upsert=True # Insert if not found, update if found
+                )
+            except Exception as e:
+                print(f"MongoDB SET Error: {e}", file=sys.stderr)
+
 
 # ============================================================
-# Logic
+# Logic (The rest of the file is unchanged, using new caching functions)
 # ============================================================
 
 def brave_search(show_title: str, media_type: str) -> List[dict]:
@@ -125,12 +187,11 @@ def summarise_with_openai(show_title: str, media_type: str, sources: List[dict])
 
     source_text = "\n\n".join(snippets)[:6000]
 
-    # CHANGED: Prompt now asks for JSON
     prompt = textwrap.dedent(f"""
     Analyze these search results for "{show_title}" ({media_type}).
     
     Return a valid JSON object with exactly two fields:
-    1. "status": One of ["Renewed", "Cancelled", "Concluded", "Released", "Unknown", "Ending", "In Production"]. 
+    1. "status": One of ["Renewed", "Cancelled", "Concluded", "Released", "Unknown", "Ending", "In Production"].
        * Use "Concluded" if the show finished its final intended season (natural ending).
        * Use "Cancelled" only if the show was abruptly stopped by the network/studio with more seasons expected.
     2. "summary": A 2-sentence natural language summary of the situation.
@@ -153,7 +214,6 @@ def summarise_with_openai(show_title: str, media_type: str, sources: List[dict])
         return completion.choices[0].message.content.strip()
     except Exception as e:
         print(f"OpenAI Error: {e}", file=sys.stderr)
-        # Fallback JSON if AI fails
         return json.dumps({"status": "Unknown", "summary": "Could not generate summary."})
 
 # ============================================================
@@ -162,7 +222,15 @@ def summarise_with_openai(show_title: str, media_type: str, sources: List[dict])
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "service": "KeepUp backend"})
+    # Show status of database connections
+    redis_status = "OK" if r else "Unavailable"
+    mongo_status = "OK" if db_collection else "Unavailable"
+    return jsonify({
+        "status": "ok", 
+        "service": "KeepUp backend",
+        "redis_status": redis_status,
+        "mongo_status": mongo_status
+    })
 
 @app.route("/api/show-status", methods=["POST"])
 def show_status():
@@ -185,20 +253,18 @@ def show_status():
     try:
         sources = brave_search(show_name, media_type)
         
-        # If no sources, return empty
         if not sources:
             result = {
                 "status": "Unknown",
                 "summary": "No recent information found.",
                 "sources": []
             }
-            set_cached_result(key, result)
+            # Cache 'Unknown' for default TTL
+            set_cached_result(key, result, status=result["status"]) 
             return jsonify(result)
 
-        # Get JSON string from OpenAI
         ai_json_string = summarise_with_openai(show_name, media_type, sources)
         
-        # Parse the JSON string to actual object
         try:
             ai_data = json.loads(ai_json_string)
         except:
@@ -210,7 +276,8 @@ def show_status():
             "sources": [{"title": s.get("title"), "url": s.get("url")} for s in sources]
         }
 
-        set_cached_result(key, result)
+        # Cache the result dynamically to Redis (always) and MongoDB (if status is permanent)
+        set_cached_result(key, result, status=result["status"])
         return jsonify(result)
 
     except Exception as e:
