@@ -4,4 +4,5 @@ openai>=1.0.0
 requests
 gunicorn
 beautifulsoup4
-redis 
+redis
+pymongo  # ✅ MongoDB driver for persistent cache
