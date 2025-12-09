@@ -50,7 +50,10 @@ if MONGO_URI:
     try:
         mongo_client = pymongo.MongoClient(MONGO_URI)
         db_collection = mongo_client.get_database("keepup_db").get_collection("ai_status")
-        db_collection.create_index([("_id", pymongo.ASCENDING)], unique=True)
+        
+        # ✅ FIX: Removed unique=True argument, as _id is unique by default
+        db_collection.create_index([("_id", pymongo.ASCENDING)])
+        
         print("✅ MongoDB connected successfully.")
     except Exception as e:
         db_collection = None # Set to None on failure
@@ -84,7 +87,7 @@ def get_cached_result(key: str):
             print(f"Redis GET Error: {e}", file=sys.stderr)
 
     # TIER 2: Check MongoDB (Persistent)
-    if db_collection is not None: # ✅ FIX 1: Check against None
+    if db_collection is not None:
         try:
             document = db_collection.find_one({"_id": key})
             if document:
@@ -111,7 +114,7 @@ def set_cached_result(key: str, data: dict, status: str):
     status_lower = status.lower()
     
     # 1. Save to REDIS (Tier 1) for 12 hours (always)
-    if r is not None: # ✅ FIX 2: Check against None
+    if r is not None:
         try:
             r.set(key, json.dumps(data), ex=DEFAULT_CACHE_TTL_SECONDS)
         except Exception as e:
@@ -119,7 +122,7 @@ def set_cached_result(key: str, data: dict, status: str):
 
     # 2. Save to MONGODB (Tier 2) only if status is permanent
     if status_lower in PERMANENT_STATUSES:
-        if db_collection is not None: # ✅ FIX 3: Check against None
+        if db_collection is not None:
             # Set expiry far in the future (100 years)
             expiry_time = int(time.time() + (60 * 60 * 24 * 365 * 100)) 
             
@@ -141,7 +144,6 @@ def set_cached_result(key: str, data: dict, status: str):
 # ============================================================
 
 def brave_search(show_title: str, media_type: str) -> List[dict]:
-    # ... (brave_search function remains here)
     if not BRAVE_API_KEY:
         print("Brave Search skipped: Missing API Key")
         return []
@@ -175,7 +177,6 @@ def brave_search(show_title: str, media_type: str) -> List[dict]:
         return []
 
 def summarise_with_openai(show_title: str, media_type: str, sources: List[dict]) -> str:
-    # ... (summarise_with_openai function remains here)
     if not client:
         return json.dumps({"status": "Unknown", "summary": "AI is unavailable (Missing Key)."})
 
@@ -217,10 +218,7 @@ def summarise_with_openai(show_title: str, media_type: str, sources: List[dict])
 
 @app.route("/", methods=["GET"])
 def health():
-    # ✅ FIX 4: Corrected boolean check for Redis object
     redis_status = "OK" if r is not None else "Unavailable" 
-    
-    # ✅ FIX 5: Corrected boolean check for pymongo Collection object
     mongo_status = "OK" if db_collection is not None else "Unavailable" 
     
     return jsonify({
