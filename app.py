@@ -20,7 +20,7 @@ import pymongo # MongoDB client
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0") 
-MONGO_URI = os.getenv("MONGO_URI")
+MONGO_URI = os.getenv("MONGO_URI") # MongoDB Atlas Connection String
 
 # Connection Objects
 client = None
@@ -50,10 +50,8 @@ if MONGO_URI:
     try:
         mongo_client = pymongo.MongoClient(MONGO_URI)
         db_collection = mongo_client.get_database("keepup_db").get_collection("ai_status")
-        
-        # ✅ FIX: Removed unique=True argument, as _id is unique by default
-        db_collection.create_index([("_id", pymongo.ASCENDING)])
-        
+        # FIX: Removed redundant unique=True argument on _id index
+        db_collection.create_index([("_id", pymongo.ASCENDING)]) 
         print("✅ MongoDB connected successfully.")
     except Exception as e:
         db_collection = None # Set to None on failure
@@ -72,6 +70,7 @@ CORS(app)
 # ============================================================
 
 def _cache_key(title: str, media_type: str) -> str:
+    # Key format: 'sha256hash'
     raw = f"{title.lower().strip()}|{media_type}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -176,7 +175,7 @@ def brave_search(show_title: str, media_type: str) -> List[dict]:
         print(f"Brave Search Error: {e}", file=sys.stderr)
         return []
 
-def summarise_with_openai(show_title: str, media_type: str, sources: List[dict]) -> str:
+def summarise_with_openai(show_title: str, media_type: str, sources: List[dict], current_date: str) -> str:
     if not client:
         return json.dumps({"status": "Unknown", "summary": "AI is unavailable (Missing Key)."})
 
@@ -187,8 +186,9 @@ def summarise_with_openai(show_title: str, media_type: str, sources: List[dict])
 
     source_text = "\n\n".join(snippets)[:6000]
 
+    # ADDED: Current date to the prompt for context
     prompt = textwrap.dedent(f"""
-    Analyze these search results for "{show_title}" ({media_type}).
+    Analyze these search results for "{show_title}" ({media_type}). The current date is {current_date}.
     
     Return a valid JSON object with exactly two fields:
     1. "status": One of ["Renewed", "Cancelled", "Concluded", "Released", "Unknown", "Ending", "In Production"].
@@ -218,6 +218,7 @@ def summarise_with_openai(show_title: str, media_type: str, sources: List[dict])
 
 @app.route("/", methods=["GET"])
 def health():
+    # FIX: Correct checks for Pythonic truthiness
     redis_status = "OK" if r is not None else "Unavailable" 
     mongo_status = "OK" if db_collection is not None else "Unavailable" 
     
@@ -237,6 +238,9 @@ def show_status():
     if isinstance(is_tv, str):
         is_tv = is_tv.lower() == 'true'
     media_type = "tv" if is_tv else "movie"
+    
+    # NEW: Extract current date from app, or use server date as fallback
+    current_date = payload.get("currentDate", time.strftime("%Y-%m-%d"))
 
     if not show_name:
         return jsonify({"error": "showName is required"}), 400
@@ -258,7 +262,8 @@ def show_status():
             set_cached_result(key, result, status=result["status"]) 
             return jsonify(result)
 
-        ai_json_string = summarise_with_openai(show_name, media_type, sources)
+        # PASS the current_date to the summarization function
+        ai_json_string = summarise_with_openai(show_name, media_type, sources, current_date)
         
         try:
             ai_data = json.loads(ai_json_string)
