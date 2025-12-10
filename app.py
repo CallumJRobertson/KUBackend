@@ -62,7 +62,6 @@ DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 12
 PERMANENT_STATUSES = ["cancelled", "concluded", "ended"] 
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 
-# ✅ THIS WAS MISSING IN YOUR ERROR:
 app = Flask(__name__)
 CORS(app)
 
@@ -190,7 +189,7 @@ def show_status():
     return jsonify(result)
 
 # ============================================================
-# Smart Briefing Endpoint
+# Smart Briefing Endpoint (Useful Version)
 # ============================================================
 @app.route("/api/generate-briefing", methods=["POST"])
 def generate_briefing():
@@ -212,21 +211,18 @@ def generate_briefing():
         })
     # -------------------
 
-    # 1. Parse and Sort Shows by Date
+    # 1. Parse and Sort Shows
     valid_shows = []
     try:
         user_date = datetime.strptime(user_date_str, "%Y-%m-%d")
-        
         for u in updates:
             date_str = u.get("nextAirDate")
             title = u.get("title")
-            
             if date_str:
                 try:
                     air_date = datetime.strptime(date_str, "%Y-%m-%d")
                     days_diff = (air_date - user_date).days
                     
-                    # FILTER: Keep shows coming in the next 30 days only
                     if -1 <= days_diff <= 30:
                         valid_shows.append({
                             "title": title,
@@ -235,24 +231,22 @@ def generate_briefing():
                             "date_str": date_str
                         })
                 except ValueError:
-                    continue 
-                    
+                    continue
         valid_shows.sort(key=lambda x: x["date"])
-        
     except Exception as e:
-        print(f"Date parsing error: {e}")
-        return jsonify({"briefing": "Unable to calculate dates."})
+        print(f"Date error: {e}")
+        return jsonify({"briefing": "Calendar sync error."})
 
     if not valid_shows:
-        return jsonify({"briefing": "It's quiet for now. Nothing on your list is airing in the next 30 days."})
+        return jsonify({"briefing": "Nothing on the radar for the next 30 days."})
 
-    # 2. Build the AI Context
-    top_shows = valid_shows[:5]
+    # 2. Build Context
+    top_shows = valid_shows[:6]
     show_descriptions = []
     for s in top_shows:
         days = s["days_diff"]
-        if days == 0: when = "TODAY"
-        elif days == 1: when = "Tomorrow"
+        if days == 0: when = "TONIGHT"
+        elif days == 1: when = "TOMORROW"
         elif days < 7: when = f"this {s['date'].strftime('%A')}"
         else: when = f"on {s['date'].strftime('%b %d')}"
         
@@ -260,16 +254,17 @@ def generate_briefing():
 
     context_str = "\n".join(show_descriptions)
 
-    # 3. The Prompt
+    # 3. The "Useful" Prompt
     prompt_text = f"""
-    The user tracks these TV shows which are airing very soon (Today is {user_date_str}):
+    User's TV Schedule (Today is {user_date_str}):
     {context_str}
     
-    Write a short, high-energy "Morning Briefing" (2-3 sentences max).
-    - Prioritize the shows airing TODAY or TOMORROW if any.
-    - Be conversational (e.g., "Clear your schedule for tonight", "The wait is finally over").
-    - Mention specific show names.
-    - Ignore shows that are weeks away unless there is nothing else.
+    Write a clean, structured "Intel Brief".
+    - Group items logically (e.g., "Tonight:", "This Week:", "Later:").
+    - Use bullet points or bold keywords if possible (markdown supported).
+    - Be concise. No fluff. Just the schedule.
+    - Example format:
+      "🚀 **Tonight:** [Show Name] returns.\n📅 **This Week:** Look out for [Show Name] on Tuesday."
     """
 
     try:
@@ -278,15 +273,15 @@ def generate_briefing():
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a hype-man for TV shows."},
+                {"role": "system", "content": "You are a precise scheduling assistant."},
                 {"role": "user", "content": prompt_text}
             ],
-            max_tokens=150,
-            temperature=0.7,
+            max_tokens=200,
+            temperature=0.5,
         )
         briefing = completion.choices[0].message.content.strip()
         
-        # --- CACHE SAVE ---
+        # Save to Cache
         result_data = {"briefing": briefing}
         set_cached_result(cache_key, result_data, status="active")
         
@@ -294,7 +289,7 @@ def generate_briefing():
 
     except Exception as e:
         print(f"Briefing Error: {e}", file=sys.stderr)
-        return jsonify({"briefing": "Your shows are coming back soon! Check the list below."})
+        return jsonify({"briefing": "Unable to generate brief."})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
