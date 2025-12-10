@@ -73,13 +73,6 @@ def _cache_key(title: str, media_type: str) -> str:
     raw = f"{title.lower().strip()}|{media_type}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
-def _briefing_cache_key(updates: List[dict], user_date: str) -> str:
-    # Sort updates by title so the order doesn't break the hash
-    sorted_updates = sorted(updates, key=lambda x: x.get('title', ''))
-    titles = "|".join([u.get('title', '') for u in sorted_updates])
-    raw = f"briefing|{user_date}|{titles}"
-    return hashlib.sha256(raw.encode()).hexdigest()
-
 def get_cached_result(key: str):
     # TIER 1: Redis
     if r is not None:
@@ -187,109 +180,6 @@ def show_status():
     }
     set_cached_result(key, result, status=result["status"])
     return jsonify(result)
-
-# ============================================================
-# Smart Briefing Endpoint (Useful Version)
-# ============================================================
-@app.route("/api/generate-briefing", methods=["POST"])
-def generate_briefing():
-    payload = request.get_json(force=True, silent=True) or {}
-    updates = payload.get("updates", [])
-    user_date_str = payload.get("userDate", time.strftime("%Y-%m-%d"))
-    
-    if not updates:
-        return jsonify({"briefing": "No upcoming shows found."})
-
-    # --- CACHE CHECK ---
-    cache_key = _briefing_cache_key(updates, user_date_str)
-    cached_data = get_cached_result(cache_key)
-    
-    if cached_data:
-        return jsonify({
-            "briefing": cached_data.get("briefing"),
-            "cached": True
-        })
-    # -------------------
-
-    # 1. Parse and Sort Shows
-    valid_shows = []
-    try:
-        user_date = datetime.strptime(user_date_str, "%Y-%m-%d")
-        for u in updates:
-            date_str = u.get("nextAirDate")
-            title = u.get("title")
-            if date_str:
-                try:
-                    air_date = datetime.strptime(date_str, "%Y-%m-%d")
-                    days_diff = (air_date - user_date).days
-                    
-                    if -1 <= days_diff <= 30:
-                        valid_shows.append({
-                            "title": title,
-                            "date": air_date,
-                            "days_diff": days_diff,
-                            "date_str": date_str
-                        })
-                except ValueError:
-                    continue
-        valid_shows.sort(key=lambda x: x["date"])
-    except Exception as e:
-        print(f"Date error: {e}")
-        return jsonify({"briefing": "Calendar sync error."})
-
-    if not valid_shows:
-        return jsonify({"briefing": "Nothing on the radar for the next 30 days."})
-
-    # 2. Build Context
-    top_shows = valid_shows[:6]
-    show_descriptions = []
-    for s in top_shows:
-        days = s["days_diff"]
-        if days == 0: when = "TONIGHT"
-        elif days == 1: when = "TOMORROW"
-        elif days < 7: when = f"this {s['date'].strftime('%A')}"
-        else: when = f"on {s['date'].strftime('%b %d')}"
-        
-        show_descriptions.append(f"- {s['title']} ({when})")
-
-    context_str = "\n".join(show_descriptions)
-
-    # 3. The "Useful" Prompt
-    prompt_text = f"""
-    User's TV Schedule (Today is {user_date_str}):
-    {context_str}
-    
-    Write a clean, structured "Intel Brief".
-    - Group items logically (e.g., "Tonight:", "This Week:", "Later:").
-    - Use bullet points or bold keywords if possible (markdown supported).
-    - Be concise. No fluff. Just the schedule.
-    - Example format:
-      "🚀 **Tonight:** [Show Name] returns.\n📅 **This Week:** Look out for [Show Name] on Tuesday."
-    """
-
-    try:
-        if not client: raise Exception("No OpenAI")
-        
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a precise scheduling assistant."},
-                {"role": "user", "content": prompt_text}
-            ],
-            max_tokens=200,
-            temperature=0.5,
-        )
-        briefing = completion.choices[0].message.content.strip()
-        
-        # Save to Cache
-        result_data = {"briefing": briefing}
-        set_cached_result(cache_key, result_data, status="active")
-        
-        return jsonify({"briefing": briefing, "cached": False})
-
-    except Exception as e:
-        print(f"Briefing Error: {e}", file=sys.stderr)
-        return jsonify({"briefing": "Unable to generate brief."})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
