@@ -1,6 +1,5 @@
-# ... [Keep imports and setup from previous step] ...
-# (The first 150 lines of caching logic remain the same. 
-# Just replace the generate_briefing function at the bottom)
+# ... [Keep previous imports and setup] ...
+# (The top part of the file remains the same. Replace the generate_briefing function at the bottom)
 
 @app.route("/api/generate-briefing", methods=["POST"])
 def generate_briefing():
