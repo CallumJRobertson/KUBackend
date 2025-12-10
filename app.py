@@ -283,6 +283,51 @@ def show_status():
         print(f"ERROR: {e}", file=sys.stderr)
         return jsonify({"error": str(e)}), 500
 
+# ============================================================
+# NEW: Briefing Endpoint
+# ============================================================
+@app.route("/api/generate-briefing", methods=["POST"])
+def generate_briefing():
+    # 1. Get the list of shows from the iOS app
+    payload = request.get_json(force=True, silent=True) or {}
+    updates = payload.get("updates", [])
+    
+    if not updates:
+        return jsonify({"briefing": "No upcoming shows? Time to find some new favorites!"})
+
+    # 2. Prepare the list for the AI (take first 5)
+    shows_context = ", ".join([f"{u.get('title', 'Unknown')} ({u.get('network', 'TV')})" for u in updates[:5]])
+
+    # 3. The Prompt
+    prompt_text = f"""
+    The user tracks these TV shows which have new episodes coming up: {shows_context}.
+    
+    Write a short, high-energy "Morning Briefing" (2-3 sentences max) for the user.
+    - Be conversational and hype them up (e.g. "Clear your schedule", "The wait is over").
+    - Mention specific show names from the list.
+    - Do NOT use "Here is your summary" or robot speak. Jump right into the hype.
+    """
+
+    try:
+        if not client:
+            raise Exception("OpenAI client not initialized")
+
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a witty TV tracking assistant."},
+                {"role": "user", "content": prompt_text}
+            ],
+            max_tokens=150,
+            temperature=0.7,
+        )
+        briefing = completion.choices[0].message.content.strip()
+        return jsonify({"briefing": briefing})
+
+    except Exception as e:
+        print(f"Briefing Error: {e}", file=sys.stderr)
+        return jsonify({"briefing": "Your shows are returning soon! Check the list below for details."})
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
